@@ -5,7 +5,6 @@ from datetime import timedelta
 from datetime import datetime
 from pathlib import Path
 
-import time
 import urllib.request
 import voluptuous as vol
 
@@ -19,18 +18,14 @@ from wyze_sdk import Client
 
 from homeassistant.helpers import config_validation as cv, entity_platform
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.components.vacuum.const import VacuumActivity
+
 from homeassistant.components.vacuum import (
-    STATE_CLEANING,
-    STATE_DOCKED,
-    STATE_RETURNING,
-    STATE_ERROR,
-    STATE_PAUSED,
     StateVacuumEntity,
     VacuumEntityFeature,
 )
 
 SUPPORT_WYZE = (
-    VacuumEntityFeature.BATTERY |
     VacuumEntityFeature.CLEAN_SPOT |
     VacuumEntityFeature.FAN_SPEED |
     VacuumEntityFeature.LOCATE |
@@ -98,10 +93,9 @@ class WyzeVac(StateVacuumEntity):
         self._client = client
         self._vac_mac = pl["mac"]
         self._model = pl["model"]
-        self._last_mode = STATE_DOCKED
+        self._last_mode = VacuumActivity.DOCKED
         self._name = pl["name"]
         self._fan_speed = pl["suction"]
-        self._battery_level = pl["battery"]
 
         self._filter = pl["filter"]
         self._main_brush = pl["main_brush"]
@@ -116,6 +110,8 @@ class WyzeVac(StateVacuumEntity):
         self._polling = polling
 
         self._room_manager = pl["room_manager"]
+        self._wyze_battery = pl["battery"]
+
         self._rooms = []
         for name, stat in self._room_manager.rooms.items():
             self._rooms.append(name)
@@ -152,7 +148,7 @@ class WyzeVac(StateVacuumEntity):
     @property
     def is_on(self):
         """Return true if vacuum is currently cleaning."""
-        return self._last_mode != STATE_DOCKED
+        return self._last_mode != VacuumActivity.DOCKED
 
     @property
     def status(self):
@@ -160,7 +156,7 @@ class WyzeVac(StateVacuumEntity):
         return self._last_mode
 
     @property
-    def state(self):
+    def activity(self):
         """Return the state of the vacuum cleaner."""
         return self._last_mode
 
@@ -183,11 +179,6 @@ class WyzeVac(StateVacuumEntity):
     def should_poll(self) -> bool:
         """Return True if entity has to be polled for state."""
         return self._polling
-    
-    @property
-    def battery_level(self):
-        """Return the battery level of the vacuum cleaner."""
-        return self._battery_level
 
     @property
     def extra_state_attributes(self):
@@ -229,7 +220,7 @@ class WyzeVac(StateVacuumEntity):
             await self.get_new_client()
         finally:
             await self.hass.async_add_executor_job(lambda: self._client.vacuums.pause(device_mac=self._vac_mac, device_model=self._model))
-        self._last_mode = STATE_PAUSED
+        self._last_mode = VacuumActivity.PAUSED
 
         self.async_schedule_update_ha_state(force_refresh=True)
 
@@ -242,7 +233,7 @@ class WyzeVac(StateVacuumEntity):
             await self.get_new_client()
         finally:
             await self.hass.async_add_executor_job(lambda: self._client.vacuums.pause(device_mac=self._vac_mac, device_model=self._model))
-        self._last_mode = STATE_PAUSED
+        self._last_mode = VacuumActivity.PAUSED
 
         self.async_schedule_update_ha_state(force_refresh=True)
 
@@ -255,7 +246,7 @@ class WyzeVac(StateVacuumEntity):
             await self.get_new_client()
         finally:
             await self.hass.async_add_executor_job(lambda: self._client.vacuums.dock(device_mac=self._vac_mac, device_model=self._model))
-        self._last_mode = STATE_RETURNING
+        self._last_mode = VacuumActivity.RETURNING
 
         self.async_schedule_update_ha_state(force_refresh=True)
 
@@ -266,7 +257,7 @@ class WyzeVac(StateVacuumEntity):
 
     async def async_start_pause(self, **kwargs):
         """Start, pause or resume the cleaning task."""
-        if self._last_mode in [ STATE_CLEANING, STATE_RETURNING]:
+        if self._last_mode in [ VacuumActivity.CLEANING, VacuumActivity.RETURNING]:
             await self.async_pause()
         else:
             await self.async_start()
@@ -332,18 +323,18 @@ class WyzeVac(StateVacuumEntity):
 
         # Get vacuum mode
         if vacuum.mode in [VacuumMode.SWEEPING, VacuumMode.CLEANING, VacuumMode.QUICK_MAPPING_MAPPING]:
-            self._last_mode = STATE_CLEANING
+            self._last_mode = VacuumActivity.CLEANING
         elif vacuum.mode in [VacuumMode.IDLE, VacuumMode.BREAK_POINT, VacuumMode.DOCKED_NOT_COMPLETE, VacuumMode.QUICK_MAPPING_DOCKED_NOT_COMPLETE]:
-            self._last_mode = STATE_DOCKED
+            self._last_mode = VacuumActivity.DOCKED
         elif vacuum.mode in [VacuumMode.ON_WAY_CHARGE, VacuumMode.FULL_FINISH_SWEEPING_ON_WAY_CHARGE, VacuumMode.FINISHED_RETURNING_TO_CHARGE, VacuumMode.RETURNING_TO_CHARGE, VacuumMode.QUICK_MAPPING_COMPLETED_RETURNING_TO_CHARGE]:
-            self._last_mode = STATE_RETURNING
+            self._last_mode = VacuumActivity.RETURNING
         elif vacuum.mode in [VacuumMode.PAUSED, VacuumMode.PAUSE, VacuumMode.QUICK_MAPPING_PAUSED]:
-            self._last_mode = STATE_PAUSED
+            self._last_mode = VacuumActivity.PAUSED
         else:
-            self._last_mode = STATE_ERROR
+            self._last_mode = VacuumActivity.ERROR
 
         # Update battery
-        self._battery_level = vacuum.voltage
+        self._wyze_battery.value = vacuum.voltage
 
         # Update suction level
         self._fan_speed = vacuum.clean_level.describe()

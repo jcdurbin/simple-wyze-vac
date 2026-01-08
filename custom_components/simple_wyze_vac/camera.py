@@ -18,7 +18,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
 class SWVCamera(LocalFile):
     def __init__(self, pl, file_path):
-        unique_id = pl["name"] + " Camera"
+        unique_id = "swv_" + pl["name"] + "_camera"
         super().__init__(pl["name"], file_path, unique_id)
         self._model = pl["model"]
 
