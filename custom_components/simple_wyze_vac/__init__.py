@@ -37,7 +37,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # List of platforms to support. There should be a matching .py file for each,
 # eg <cover.py> and <sensor.py>
-PLATFORMS: list[str] = ["vacuum", "switch", "camera"]
+PLATFORMS: list[str] = ["vacuum", "switch", "camera", "sensor"]
 
 async def async_setup_entry(hass: core.HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Hello World from a config entry."""
@@ -91,11 +91,11 @@ async def async_setup_entry(hass: core.HomeAssistant, entry: ConfigEntry) -> boo
             "model": device.product.model,
             "name": device.nickname,
             "suction": vac_info.clean_level.describe(),
-            "battery": vac_info.voltage,
             "filter": vac_info.supplies.filter.remaining,
             "main_brush": vac_info.supplies.main_brush.remaining,
             "side_brush": vac_info.supplies.side_brush.remaining,
-            "room_manager": room_manager
+            "room_manager": room_manager,
+            "battery": WyzeBattery(vac_info.voltage)
         }
 
         hass.data[WYZE_VACUUMS].append(payload)
@@ -144,3 +144,9 @@ class SWVRoomManager:
 
     def clear(self, room_name):
         self._rooms[room_name] = False
+
+class WyzeBattery:
+
+    def __init__(self, value=0):
+        self.value = value
+    
