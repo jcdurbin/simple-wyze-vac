@@ -3,6 +3,7 @@ import voluptuous as vol
 import asyncio
 
 from datetime import timedelta
+from functools import lru_cache
 
 
 import homeassistant.helpers.config_validation as cv
@@ -39,8 +40,54 @@ _LOGGER = logging.getLogger(__name__)
 # eg <cover.py> and <sensor.py>
 PLATFORMS: list[str] = ["vacuum", "switch", "camera", "sensor"]
 
+
+@lru_cache(maxsize=1)
+def _patch_wyze_sdk_ssl() -> str | None:
+    """Point wyze_sdk's requests sessions at the system CA bundle.
+
+    Background: api.wyzecam.com's chain is rooted at DigiCert Global Root CA
+    (the original 2006 root). Mozilla scheduled that root for distrust, and
+    certifi 2026.04.22 — which ships in HA Core 2026.4's Python 3.14 image —
+    no longer contains it. The HAOS system CA bundle still does, so we route
+    wyze_sdk's verification through that instead of certifi.
+
+    Patches BaseServiceClient._do_request to set session.verify before send().
+    Returns the bundle path used (for logging) or None if no usable bundle was
+    found, in which case the SDK falls back to certifi and will fail.
+    """
+    import os
+    import ssl
+    from wyze_sdk.service import base as wyze_base
+
+    candidates = [
+        ssl.get_default_verify_paths().cafile,
+        "/etc/ssl/cert.pem",
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+    ]
+    bundle = next((p for p in candidates if p and os.path.exists(p)), None)
+    if bundle is None:
+        _LOGGER.warning(
+            "No system CA bundle found; wyze_sdk will use certifi, which on "
+            "HA 2026.4+ no longer trusts api.wyzecam.com's root."
+        )
+        return None
+
+    original_do_request = wyze_base.BaseServiceClient._do_request
+
+    def _do_request_with_system_ca(self, session, request):
+        session.verify = bundle
+        return original_do_request(self, session, request)
+
+    wyze_base.BaseServiceClient._do_request = _do_request_with_system_ca
+    _LOGGER.info("Routed wyze_sdk SSL verification through system CA bundle: %s", bundle)
+    return bundle
+
+
 async def async_setup_entry(hass: core.HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Hello World from a config entry."""
+    await hass.async_add_executor_job(_patch_wyze_sdk_ssl)
+
     # Store an instance of the "connecting" class that does the work of speaking
     # with your actual devices.
     username = entry.data.get(CONF_USERNAME)
