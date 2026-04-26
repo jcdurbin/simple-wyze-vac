@@ -41,101 +41,51 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[str] = ["vacuum", "switch", "camera", "sensor"]
 
 
-def _log_ssl_diagnostics() -> None:
-    """Dump certifi/openssl/truststore state to the HA log.
+@lru_cache(maxsize=1)
+def _patch_wyze_sdk_ssl() -> str | None:
+    """Point wyze_sdk's requests sessions at the system CA bundle.
 
-    Called on every config entry setup so we can diagnose Python 3.14 / certifi
-    chain validation failures (HA 2026.3+) without needing host shell access.
-    Looks for DigiCert Global Root CA in certifi's bundle since that's the root
-    `api.wyzecam.com` chains to.
+    Background: api.wyzecam.com's chain is rooted at DigiCert Global Root CA
+    (the original 2006 root). Mozilla scheduled that root for distrust, and
+    certifi 2026.04.22 — which ships in HA Core 2026.4's Python 3.14 image —
+    no longer contains it. The HAOS system CA bundle still does, so we route
+    wyze_sdk's verification through that instead of certifi.
+
+    Patches BaseServiceClient._do_request to set session.verify before send().
+    Returns the bundle path used (for logging) or None if no usable bundle was
+    found, in which case the SDK falls back to certifi and will fail.
     """
     import os
     import ssl
-    import sys
+    from wyze_sdk.service import base as wyze_base
 
-    _LOGGER.warning("[swv-diag] python=%s", sys.version.replace("\n", " "))
-    _LOGGER.warning("[swv-diag] openssl=%s", ssl.OPENSSL_VERSION)
-
-    try:
-        import certifi
-        bundle_path = certifi.where()
-        bundle_exists = os.path.exists(bundle_path)
-        bundle_size = os.path.getsize(bundle_path) if bundle_exists else 0
+    candidates = [
+        ssl.get_default_verify_paths().cafile,
+        "/etc/ssl/cert.pem",
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+    ]
+    bundle = next((p for p in candidates if p and os.path.exists(p)), None)
+    if bundle is None:
         _LOGGER.warning(
-            "[swv-diag] certifi=%s path=%s exists=%s size=%d",
-            certifi.__version__, bundle_path, bundle_exists, bundle_size,
+            "No system CA bundle found; wyze_sdk will use certifi, which on "
+            "HA 2026.4+ no longer trusts api.wyzecam.com's root."
         )
-        if bundle_exists:
-            with open(bundle_path, "rb") as f:
-                bundle = f.read()
-            for marker in (
-                b"DigiCert Global Root CA",
-                b"DigiCert Global Root G2",
-                b"DigiCert Global Root G3",
-            ):
-                _LOGGER.warning(
-                    "[swv-diag] certifi-contains %r = %s",
-                    marker.decode(), marker in bundle,
-                )
-    except Exception as err:
-        _LOGGER.warning("[swv-diag] certifi inspection failed: %s", err)
-
-    try:
-        default_paths = ssl.get_default_verify_paths()
-        _LOGGER.warning("[swv-diag] ssl-default-paths=%r", default_paths)
-        for p in (default_paths.cafile, default_paths.openssl_cafile,
-                  "/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem"):
-            if p:
-                _LOGGER.warning(
-                    "[swv-diag] os-bundle %s exists=%s",
-                    p, os.path.exists(p),
-                )
-    except Exception as err:
-        _LOGGER.warning("[swv-diag] ssl path inspection failed: %s", err)
-
-    try:
-        import truststore
-        _LOGGER.warning("[swv-diag] truststore=%s", getattr(truststore, "__version__", "unknown"))
-    except Exception as err:
-        _LOGGER.warning("[swv-diag] truststore import failed: %s", err)
-
-    try:
-        import urllib.request
-        urllib.request.urlopen("https://api.wyzecam.com/", timeout=10)
-        _LOGGER.warning("[swv-diag] urlopen-default: HTTP success")
-    except Exception as err:
-        _LOGGER.warning("[swv-diag] urlopen-default: %s: %s", type(err).__name__, err)
-
-
-@lru_cache(maxsize=1)
-def _patch_wyze_sdk_ssl() -> None:
-    """Force wyze_sdk's requests sessions to validate via the OS trust store."""
-    try:
-        import ssl
-        import truststore
-        from requests.adapters import HTTPAdapter
-        from wyze_sdk.service import base as wyze_base
-    except Exception as err:  # pragma: no cover
-        _LOGGER.warning("Could not patch wyze_sdk SSL handling: %s", err)
-        return
-
-    class _TruststoreAdapter(HTTPAdapter):
-        def init_poolmanager(self, *args, **kwargs):
-            kwargs["ssl_context"] = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            return super().init_poolmanager(*args, **kwargs)
+        return None
 
     original_do_request = wyze_base.BaseServiceClient._do_request
 
-    def _do_request_with_truststore(self, session, request):
-        session.mount("https://", _TruststoreAdapter())
+    def _do_request_with_system_ca(self, session, request):
+        session.verify = bundle
         return original_do_request(self, session, request)
 
-    wyze_base.BaseServiceClient._do_request = _do_request_with_truststore
+    wyze_base.BaseServiceClient._do_request = _do_request_with_system_ca
+    _LOGGER.info("Routed wyze_sdk SSL verification through system CA bundle: %s", bundle)
+    return bundle
 
 
 async def async_setup_entry(hass: core.HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Hello World from a config entry."""
-    await hass.async_add_executor_job(_log_ssl_diagnostics)
     await hass.async_add_executor_job(_patch_wyze_sdk_ssl)
 
     # Store an instance of the "connecting" class that does the work of speaking
