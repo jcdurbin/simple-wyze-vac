@@ -3,6 +3,7 @@ import voluptuous as vol
 import asyncio
 
 from datetime import timedelta
+from functools import lru_cache
 
 
 import homeassistant.helpers.config_validation as cv
@@ -39,8 +40,28 @@ _LOGGER = logging.getLogger(__name__)
 # eg <cover.py> and <sensor.py>
 PLATFORMS: list[str] = ["vacuum", "switch", "camera", "sensor"]
 
+
+@lru_cache(maxsize=1)
+def _enable_system_truststore() -> None:
+    """Route SSL validation through the OS trust store.
+
+    wyze_sdk builds its own requests.Session and validates against certifi's
+    bundle, which on Python 3.14 (HA 2026.3+) fails for api.wyzecam.com with
+    CERTIFICATE_VERIFY_FAILED. truststore is a HA Core dependency, so injecting
+    it lets the SDK use HAOS's system CA store instead. Cached so it runs once
+    per process even with multiple config entries.
+    """
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+    except Exception as err:  # pragma: no cover
+        _LOGGER.warning("Could not enable system truststore for SSL: %s", err)
+
+
 async def async_setup_entry(hass: core.HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Hello World from a config entry."""
+    await hass.async_add_executor_job(_enable_system_truststore)
+
     # Store an instance of the "connecting" class that does the work of speaking
     # with your actual devices.
     username = entry.data.get(CONF_USERNAME)
