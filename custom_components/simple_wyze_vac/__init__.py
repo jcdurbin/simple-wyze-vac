@@ -42,25 +42,45 @@ PLATFORMS: list[str] = ["vacuum", "switch", "camera", "sensor"]
 
 
 @lru_cache(maxsize=1)
-def _enable_system_truststore() -> None:
-    """Route SSL validation through the OS trust store.
+def _patch_wyze_sdk_ssl() -> None:
+    """Force wyze_sdk's requests sessions to validate via the OS trust store.
 
-    wyze_sdk builds its own requests.Session and validates against certifi's
-    bundle, which on Python 3.14 (HA 2026.3+) fails for api.wyzecam.com with
-    CERTIFICATE_VERIFY_FAILED. truststore is a HA Core dependency, so injecting
-    it lets the SDK use HAOS's system CA store instead. Cached so it runs once
-    per process even with multiple config entries.
+    On Python 3.14 (HA 2026.3+), `api.wyzecam.com` fails certifi-backed chain
+    validation with CERTIFICATE_VERIFY_FAILED. `truststore.inject_into_ssl()`
+    alone is not sufficient because requests passes `verify=certifi.where()` to
+    urllib3, which loads that bundle into the SSLContext explicitly. Mounting
+    an HTTPAdapter that supplies a `truststore.SSLContext` bypasses the certifi
+    path entirely and routes verification through HAOS's system CA store.
+
+    Patches `BaseServiceClient._do_request` since that's the only place the SDK
+    consumes a session. Cached so the patch is applied once per process.
     """
     try:
+        import ssl
         import truststore
-        truststore.inject_into_ssl()
+        from requests.adapters import HTTPAdapter
+        from wyze_sdk.service import base as wyze_base
     except Exception as err:  # pragma: no cover
-        _LOGGER.warning("Could not enable system truststore for SSL: %s", err)
+        _LOGGER.warning("Could not patch wyze_sdk SSL handling: %s", err)
+        return
+
+    class _TruststoreAdapter(HTTPAdapter):
+        def init_poolmanager(self, *args, **kwargs):
+            kwargs["ssl_context"] = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            return super().init_poolmanager(*args, **kwargs)
+
+    original_do_request = wyze_base.BaseServiceClient._do_request
+
+    def _do_request_with_truststore(self, session, request):
+        session.mount("https://", _TruststoreAdapter())
+        return original_do_request(self, session, request)
+
+    wyze_base.BaseServiceClient._do_request = _do_request_with_truststore
 
 
 async def async_setup_entry(hass: core.HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Hello World from a config entry."""
-    await hass.async_add_executor_job(_enable_system_truststore)
+    await hass.async_add_executor_job(_patch_wyze_sdk_ssl)
 
     # Store an instance of the "connecting" class that does the work of speaking
     # with your actual devices.
